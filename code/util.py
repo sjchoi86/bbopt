@@ -139,3 +139,43 @@ def scale_to_match_range(x_to_change,y_to_refer):
     ymin,ymax = np.min(y_to_refer),np.max(y_to_refer)
     x_to_change_scale = (ymax-ymin)*(x_to_change_scale-xmin)/(xmax-xmin)+ymin
     return x_to_change_scale
+
+def get_best_xy(x_data,y_data):
+    """
+    Get the current best solution
+    """
+    min_idx = np.argmin(y_data)
+    return x_data[min_idx,:].reshape((1,-1)),y_data[min_idx,:].reshape((1,-1))
+
+def sample_from_best_voronoi_cell(x_data,y_data,x_minmax,n_sample,
+                                  max_try_sbv=5000):
+    """
+    Sample from the Best Voronoi Cell for Voronoi Optimistic Optimization (VOO)
+    """
+    x_dim = x_minmax.shape[0]
+    idx_min_voo = np.argmin(y_data) # index of the best x
+    x_evals = []
+    for _ in range(n_sample):
+        n_try,x_tried,d_tried = 0,np.zeros((max_try_sbv,x_dim)),np.zeros((max_try_sbv,1))
+        x_sol,_ = get_best_xy(x_data,y_data)
+        while True:
+            if n_try < (max_try_sbv/2):
+                x_sel = x_sampler(n_sample=1,x_minmax=x_minmax)[0] # random sample
+            else:
+                # Gaussian sampling centered at x_sel
+                x_sel = x_sol + 0.1*np.random.randn(*x_sol.shape)*np.sqrt(1e-6+x_minmax[:,1]-x_minmax[:,0].reshape((1,-1)))
+                
+            dist_sel = r_sq(x_data,x_sel)
+            idx_min_sel = np.argmin(dist_sel)
+            if idx_min_sel == idx_min_voo: 
+                break
+            # Sampling the best vcell might took a lot of time 
+            x_tried[n_try,:] = x_sel
+            d_tried[n_try,:] = r_sq(x_data[idx_min_voo,:].reshape((1,-1)),x_sel)
+            n_try += 1 # increase tick
+            if n_try >= max_try_sbv:
+                idx_min_tried = np.argmin(d_tried) # find the closest one 
+                x_sel = x_tried[idx_min_tried,:].reshape((1,-1))
+                break
+        x_evals.append(x_sel) # append 
+    return x_evals
