@@ -1,4 +1,4 @@
-import math
+import math,ray,os,time
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
@@ -159,7 +159,8 @@ def sample_from_best_voronoi_cell(x_data,y_data,x_minmax,n_sample,
         n_try,x_tried,d_tried = 0,np.zeros((max_try_sbv,x_dim)),np.zeros((max_try_sbv,1))
         x_sol,_ = get_best_xy(x_data,y_data)
         while True:
-            if n_try < (max_try_sbv/2):
+            # if n_try < (max_try_sbv/2):
+            if np.random.rand() < 0.5:
                 x_sel = x_sampler(n_sample=1,x_minmax=x_minmax)[0] # random sample
             else:
                 # Gaussian sampling centered at x_sel
@@ -179,3 +180,187 @@ def sample_from_best_voronoi_cell(x_data,y_data,x_minmax,n_sample,
                 break
         x_evals.append(x_sel) # append 
     return x_evals
+
+def run_bavoo(
+    func_eval,x_minmax,USE_RAY=True,
+    n_random=1,n_bo=1,n_voo=1,n_cd=1,
+    n_data_max=100,n_worker=10,seed=0,
+    n_sample_for_bo=2000,max_try_sbv=5000,
+    save_folder='',VERBOSE=True):
+    
+    """
+    Run BAyesian-VOO
+    """
+    if USE_RAY:
+        @ray.remote
+        def func_eval_ray(x):
+            """
+            Eval with Ray
+            """
+            y = func_eval(x)
+            return y
+    
+    np.random.seed(seed=seed) # fix seed 
+    # First start
+    x_dim = x_minmax.shape[0]
+    x_evals = x_sampler(n_sample=n_worker,x_minmax=x_minmax)
+    if USE_RAY:
+        evals = [func_eval_ray.remote(x=x_eval) for x_eval in x_evals]
+        y_evals = ray.get(evals)
+    else:
+        y_evals = [func_eval(x=x_eval) for x_eval in x_evals] 
+    x_data,y_data = np.asarray(x_evals)[:,0,:],np.asarray(y_evals)[:,0,:]
+    iclk_total = time.time()
+    
+    if VERBOSE:
+        print ( "\nStart Bayesian VOO with [%d] Workers."%(n_worker) )
+        print ( " x_dim:[%d] n_random:[%d] n_bo:[%d] n_cd:[%d]."%(x_dim,n_random,n_bo,n_cd) )
+        print ( " seed:[%d] n_sample_for_bo:[%d]."%(seed,n_sample_for_bo) )
+        if save_folder:
+            print ( " Optimization results will be saved to [%s]."%(save_folder) )
+        print ( "" )
+    
+    while True:
+        # Random sample
+        iclk_random = time.time()
+        for _ in range(n_random):
+            x_evals = x_sampler(n_sample=n_worker,x_minmax=x_minmax)
+            if USE_RAY:
+                evals = [func_eval_ray.remote(x=x_eval) for x_eval in x_evals] # EVALUATE
+                y_evals = ray.get(evals)
+            else:
+                y_evals = [func_eval(x=x_eval) for x_eval in x_evals] 
+            x_random,y_random = np.asarray(x_evals)[:,0,:],np.asarray(y_evals)[:,0,:]
+            x_data = np.concatenate((x_data,x_random),axis=0)
+            y_data = np.concatenate((y_data,y_random),axis=0)
+        esec_random = time.time() - iclk_random
+        esec_total = time.time() - iclk_total
+        # Plot Random samples
+        if n_random > 0:
+            x_sol,y_sol = get_best_xy(x_data,y_data)
+            if VERBOSE:
+                print("[%.1f]sec [%d/%d] RS took [%.1f]sec. Current best x:%s best y:[%.3f]"%
+                    (esec_total,x_data.shape[0],n_data_max,esec_random,x_sol,y_sol))
+        # Terminate Condition
+        if x_data.shape[0] >= n_data_max: break
+
+        # Bayesian Optimization
+        iclk_bo = time.time()
+        for _ in range(n_bo):
+            # Constant liar model for parallelizing BO
+            x_evals,x_data_copy,y_data_copy = [],np.copy(x_data),np.copy(y_data)
+            for _ in range(n_worker):
+                x_checks = np.asarray(x_sampler(n_sample_for_bo,x_minmax=x_minmax))[:,0,:]
+                a_ei,mu_checks,_ = acquisition_function(
+                    x_data_copy,y_data_copy,x_checks,gain=1.0,invlen=5.0,eps=1e-6) # get the acquisition values 
+                max_idx = np.argmax(a_ei) # select the one with the highested value 
+                # As we cannot get the actual y_eval from the real evaluation, we use the constant liar model
+                # that uses the GP mean to approximate the actual evaluation value. 
+                x_liar,y_liar = x_checks[max_idx,:].reshape((1,-1)),mu_checks[max_idx].reshape((1,-1))
+                # Append
+                x_data_copy = np.concatenate((x_data_copy,x_liar),axis=0)
+                y_data_copy = np.concatenate((y_data_copy,y_liar),axis=0)
+                x_evals.append(x_liar) # append the inputs to evaluate 
+                
+            # Evaluate k candidates in one scoop 
+            if USE_RAY:
+                evals = [func_eval_ray.remote(x=x_eval) for x_eval in x_evals] # EVALUATE
+                y_evals = ray.get(evals)
+            else:
+                y_evals = [func_eval(x=x_eval) for x_eval in x_evals] 
+            x_bo = np.asarray(x_evals)[:,0,:]
+            y_bo = np.asarray(y_evals)[:,0,:]
+            # Concatenate BO results
+            x_data = np.concatenate((x_data,x_bo),axis=0)
+            y_data = np.concatenate((y_data,y_bo),axis=0)
+        esec_bo = time.time() - iclk_bo
+        esec_total = time.time() - iclk_total
+        # Plot BO
+        if n_bo > 0:
+            x_sol,y_sol = get_best_xy(x_data,y_data)
+            if VERBOSE:
+                print("[%.1f]sec [%d/%d] BO took [%.1f]sec. Current best x:%s best y:[%.3f]"%
+                    (esec_total,x_data.shape[0],n_data_max,esec_bo,x_sol,y_sol))
+        # Terminate Condition
+        if x_data.shape[0] >= n_data_max: break
+        
+        # Voronoi Optimistic Optimization
+        iclk_voo = time.time()
+        for _ in range(n_voo):
+            # Get input points to eval from sampling the best Voronoi cell 
+            x_evals = sample_from_best_voronoi_cell(
+                x_data,y_data,x_minmax,n_sample=n_worker,max_try_sbv=max_try_sbv)
+            # Evaluate
+            if USE_RAY:
+                evals = [func_eval_ray.remote(x=x_eval) for x_eval in x_evals] # EVALUATE
+                y_evals = ray.get(evals)
+            else:
+                y_evals = [func_eval(x=x_eval) for x_eval in x_evals] 
+            x_sbv,y_sbv = np.asarray(x_evals)[:,0,:],np.asarray(y_evals)[:,0,:]
+            x_data = np.concatenate((x_data,x_sbv),axis=0)
+            y_data = np.concatenate((y_data,y_sbv),axis=0)
+        esec_voo = time.time() - iclk_voo
+        esec_total = time.time() - iclk_total
+        # Plot VOO
+        if n_voo > 0:
+            x_sol,y_sol = get_best_xy(x_data,y_data)
+            if VERBOSE:
+                print("[%.1f]sec [%d/%d] VOO took [%.1f]sec. Current best x:%s best y:[%.3f]"%
+                    (esec_total,x_data.shape[0],n_data_max,esec_voo,x_sol,y_sol))
+        
+
+        # Coordinate Descent 
+        iclk_cd = time.time()
+        for _ in range(n_cd):
+            x_sol,y_sol = get_best_xy(x_data,y_data)
+            # for d_idx in range(x_dim): # for each dim
+            if True:
+                d_idx = np.random.permutation(x_dim)[0] # select one coordinate at a time 
+                x_minmax_d = x_minmax[d_idx,:]
+                x_sample_d = x_minmax_d[0]+(x_minmax_d[1]-x_minmax_d[0])*np.random.rand(n_worker)
+                x_sample_d[0] = x_sol[0,d_idx]
+                x_temp,x_evals = x_sol,[]
+                for i_idx in range(n_worker):
+                    x_temp[0,d_idx] = x_sample_d[i_idx]
+                    x_evals.append(np.copy(x_temp.reshape((1,-1))))
+                # Evaluate k candidates in one scoop
+                if USE_RAY:
+                    evals = [func_eval_ray.remote(x=x_eval) for x_eval in x_evals] # EVALUATE
+                    y_evals = ray.get(evals)
+                else:
+                    y_evals = [func_eval(x=x_eval) for x_eval in x_evals] 
+                # Update the current coordinate
+                min_idx = np.argmin(np.asarray(y_evals)[:,0,0])
+                x_sol[0,d_idx] = x_sample_d[min_idx]
+                # Concatenate CD results
+                x_cd,y_cd = np.asarray(x_evals)[:,0,:],np.asarray(y_evals)[:,0,:]
+                x_data = np.concatenate((x_data,x_cd),axis=0)
+                y_data = np.concatenate((y_data,y_cd),axis=0)
+        esec_cd = time.time() - iclk_cd
+        esec_total = time.time() - iclk_total
+        # Plot CD
+        if n_cd > 0:
+            x_sol,y_sol = get_best_xy(x_data,y_data)
+            if VERBOSE:
+                print("[%.1f]sec [%d/%d] CD took [%.1f]sec. Current best x:%s best y:[%.3f]"%
+                    (esec_total,x_data.shape[0],n_data_max,esec_cd,x_sol,y_sol))
+        
+        # Save intermediate resutls
+        if save_folder:
+            if not os.path.exists(save_folder):
+                os.makedirs(save_folder)
+                print ( "[%s] created."%(save_folder) )
+            # Save
+            npz_path = os.path.join(save_folder,'bavoo_result.npz')
+            np.savez(npz_path, x_data=x_data,y_data=y_data,
+                     x_minmax=x_minmax,n_random=n_random,n_bo=n_bo,n_cd=n_cd,
+                     n_data_max=n_data_max,n_worker=n_worker,seed=seed,
+                     n_sample_for_bo=n_sample_for_bo)
+            print ( "[%s] saved."%(npz_path) )
+            
+        # Terminate Condition
+        if x_data.shape[0] >= n_data_max: break
+            
+    return x_data,y_data
+    
+    
