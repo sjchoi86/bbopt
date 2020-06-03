@@ -5,6 +5,84 @@ from scipy.stats import norm
 from scipy.special import erf 
 from scipy.spatial import distance
 
+t_start_tictoc = time.time()
+def tic():
+    global t_start_tictoc
+    t_start_tictoc = time.time()
+def toc(toc_str=None):
+    global t_start_tictoc
+    t_elapsed_sec = time.time() - t_start_tictoc
+    if toc_str is None:
+        print ("Elapsed time is [%.4f]sec."%
+        (t_elapsed_sec))
+    else:
+        print ("[%s] Elapsed time is [%.4f]sec."%
+        (toc_str,t_elapsed_sec))
+
+def get_synthetic_2d_point(append_rate=0.0,xres=0.05,yres=0.05,x0=0.0,y0=0.0,PERMUTE=True,
+                           EMPTY_CENTER=False,EMPTY_MIDLEFT=False,EMPTY_MIDRIGHT=False,EMPTY_OUTER=False):
+    # Uniformly sample within mesh grid
+    xs,ys = np.meshgrid(np.arange(0,5,xres),np.arange(0,5,yres),sparse=False)
+    xys = np.dstack([xs,ys]).reshape(-1, 2)
+    n_cnt = 0
+    x = np.zeros_like(xys)
+    for i_idx in range(xys.shape[0]):
+        xy = xys[i_idx,:]
+        if (((1<xy[0]) and (xy[0]<4)) and ((1<xy[1]) and (xy[1]<4))) and EMPTY_CENTER:
+            DO_NOTHING = True
+        elif (((2.5<xy[0]) and (xy[0]<4)) and ((1<xy[1]) and (xy[1]<4))) and EMPTY_MIDLEFT:
+            DO_NOTHING = True
+        elif (((1<xy[0]) and (xy[0]<2.5)) and ((1<xy[1]) and (xy[1]<4))) and EMPTY_MIDRIGHT:
+            DO_NOTHING = True
+        elif (((4.5<xy[0]) or (xy[0]<0.5)) or ((4.5<xy[1]) or (xy[1]<0.5))) and EMPTY_OUTER:
+            DO_NOTHING = True
+        else:
+            x[n_cnt,:] = xy # append and increase counter
+            n_cnt = n_cnt + 1
+    x = x[:n_cnt,:]
+    # Add more samples in a small region
+    n_append = (int)(n_cnt*append_rate)
+    np.random.seed(0)
+    x_append = np.array([x0,y0]) + np.random.rand(n_append,2) # in [0,1]x[0,1]
+    x = np.vstack((x,x_append))
+    n = x.shape[0]
+    # Random permute
+    if PERMUTE:
+        perm_idxs = np.random.permutation(n) 
+        x = x[perm_idxs,:]
+    # Get color
+    c = get_color_with_first_and_second_coordinates(x)
+    # c = np.ceil(c*10)/10 # quantize colors into 10 bins
+    return x,c
+
+def get_color_with_first_and_second_coordinates(x):
+    c = np.concatenate((x[:,0:1],x[:,1:2]),axis=1)
+    c = (c-np.min(x,axis=0))/(np.max(x,axis=0)-np.min(x,axis=0))
+    r,g,b = 1.0-c[:,1:2],c[:,0:1],0.5-np.zeros_like(c[:,0:1])
+    c = np.concatenate((r,g,b),axis=1)
+    return c
+
+def plot_scatter(x,c='k',s=None,
+                 x2=None,fmt2='o',col2='k',lw2=2,ms2=12,mfc2='none',mew2=2,label2=None,
+                 x3=None,fmt3='o',col3='k',lw3=2,ms3=12,mfc3='none',mew3=2,label3=None,
+                 x4=None,fmt4='o',col4='k',lw4=2,ms4=12,mfc4='none',mew4=2,label4=None,
+                 figsize=(6,6),
+                 tstr=None,tfs=15,
+                 lfs=15,lloc='lower right'):
+    plt.figure(figsize=figsize)
+    plt.scatter(x[:,0],x[:,1],c=c,s=s)
+    if (x2 is not None):
+        plt.plot(x2[:,0],x2[:,1],fmt2,color=col2,linewidth=lw2,ms=ms2,mfc=mfc2,mew=mew2,label=label2)
+    if (x3 is not None):
+        plt.plot(x3[:,0],x3[:,1],fmt3,color=col3,linewidth=lw3,ms=ms3,mfc=mfc3,mew=mew3,label=label3)
+    if (x4 is not None):
+        plt.plot(x4[:,0],x4[:,1],fmt4,color=col4,linewidth=lw4,ms=ms4,mfc=mfc4,mew=mew4,label=label4)
+    if tstr is not None:
+        plt.title(tstr,fontsize=tfs)
+    if (label2 is not None):
+        plt.legend(fontsize=lfs,loc=lloc)
+    plt.axis('equal')
+    plt.show()
 
 def cos_exp_square_nd(x):
     """
@@ -70,6 +148,9 @@ def plot_line(
 
     plt.legend(fontsize=lfs,loc=lloc)
     plt.show()
+    
+def sqrt_safe(x,eps=1e-6):
+    return np.sqrt(np.abs(x)+eps)
 
 def r_sq(x1,x2,x_range=1.0,invlen=5.0):
     """
@@ -84,7 +165,8 @@ def k_m52(x1,x2,x_range=1.0,gain=1.0,invlen=5.0):
     Automatic relevance determination (ARD) Matern 5/2 kernel
     """
     R_sq = r_sq(x1,x2,x_range=x_range,invlen=invlen)
-    K = gain*(1+np.sqrt(5*R_sq)+(5.0/3.0)*R_sq)*np.exp(-np.sqrt(5*R_sq))
+    eps = 1e-6
+    K = gain*(1+sqrt_safe(5*R_sq)+(5.0/3.0)*R_sq)*np.exp(-sqrt_safe(5*R_sq))
     return K
 
 def gp_m52(x,y,x_test,gain=1.0,invlen=5.0,eps=1e-8):
@@ -122,8 +204,9 @@ def acquisition_function(x_bo,y_bo,x_test,SCALE_Y=True,gain=1.0,invlen=5.0,eps=1
         y_bo_scaled = np.copy(y_bo)
     
     mu_test,var_test = gp_m52(x_bo,y_bo_scaled,x_test,gain=gain,invlen=invlen,eps=eps)
-    gamma = (np.min(y_bo_scaled) - mu_test)/np.sqrt(var_test)
-    a_ei = 2.0 * np.sqrt(var_test) * (gamma*Phi(gamma) + norm.pdf(mu_test,0,1))
+    eps = 1e-6
+    gamma = (np.min(y_bo_scaled) - mu_test)/sqrt_safe(var_test)
+    a_ei = 2.0 * sqrt_safe(var_test) * (gamma*Phi(gamma) + norm.pdf(mu_test,0,1))
     
     if SCALE_Y:
         mu_test = 0.5 * y_range * mu_test + y_bo_mean
@@ -164,7 +247,8 @@ def sample_from_best_voronoi_cell(x_data,y_data,x_minmax,n_sample,
                 x_sel = x_sampler(n_sample=1,x_minmax=x_minmax)[0] # random sample
             else:
                 # Gaussian sampling centered at x_sel
-                x_sel = x_sol + 0.1*np.random.randn(*x_sol.shape)*np.sqrt(1e-6+x_minmax[:,1]-x_minmax[:,0].reshape((1,-1)))
+                eps = 1e-6
+                x_sel = x_sol + 0.1*np.random.randn(*x_sol.shape)*sqrt_safe(x_minmax[:,1]-x_minmax[:,0].reshape((1,-1)))
                 
             dist_sel = r_sq(x_data,x_sel)
             idx_min_sel = np.argmin(dist_sel)
@@ -181,11 +265,41 @@ def sample_from_best_voronoi_cell(x_data,y_data,x_minmax,n_sample,
         x_evals.append(x_sel) # append 
     return x_evals
 
+def get_sub_idx_from_unordered_set(K,n_sel,rand_rate=0.0):
+    n_total = K.shape[0]
+    remain_idxs = np.arange(n_total)
+    sub_idx = np.zeros((n_sel))
+    sum_K_vec = np.zeros(n_total)
+    for i_idx in range(n_sel):
+        if i_idx == 0:
+            sel_idx = np.random.randint(n_total)
+        else:
+            curr_K_vec = K[(int)(sub_idx[i_idx-1]),:] 
+            sum_K_vec = sum_K_vec + curr_K_vec
+            k_vals = sum_K_vec[remain_idxs]
+            min_idx = np.argmin(k_vals)
+            sel_idx = remain_idxs[min_idx] 
+            if rand_rate > np.random.rand():
+                rand_idx = np.random.choice(len(remain_idxs),1,replace=False)  
+                sel_idx = remain_idxs[rand_idx] 
+        sub_idx[i_idx] = (int)(sel_idx)
+        remain_idxs = np.delete(remain_idxs,np.argwhere(remain_idxs==sel_idx))
+    sub_idx = sub_idx.astype(np.int) # make it int
+    return sub_idx
+
+def get_x_sub_kdpp(x_minmax,n_sel,n_raw=10000,invlen=100):
+    x_raw = np.asarray(x_sampler(n_sample=n_raw,x_minmax=x_minmax))[:,0,:]
+    K = k_m52(x1=x_raw,x2=x_raw,x_range=x_minmax[:,1]-x_minmax[:,0],invlen=invlen) 
+    sub_idx = get_sub_idx_from_unordered_set(K,n_sel=n_sel)
+    x_sub = x_raw[sub_idx,:]
+    return x_sub
+
 def run_bavoo(
     func_eval,x_minmax,USE_RAY=True,
-    n_random=1,n_bo=1,n_voo=1,n_cd=1,
+    n_random=1,n_bo=1,n_voo=1,n_cd=1,USE_KDPP=False,
     n_data_max=100,n_worker=10,seed=0,
-    n_sample_for_bo=2000,max_try_sbv=5000,
+    n_sample_for_bo=2000,gain=1.0,invlen=5.0,eps=1e-6,
+    max_try_sbv=5000,
     save_folder='',VERBOSE=True):
     
     """
@@ -221,6 +335,7 @@ def run_bavoo(
         print ( "" )
     
     while True:
+        
         # Random sample
         iclk_random = time.time()
         for _ in range(n_random):
@@ -250,9 +365,13 @@ def run_bavoo(
             # Constant liar model for parallelizing BO
             x_evals,x_data_copy,y_data_copy = [],np.copy(x_data),np.copy(y_data)
             for _ in range(n_worker):
-                x_checks = np.asarray(x_sampler(n_sample_for_bo,x_minmax=x_minmax))[:,0,:]
+                if USE_KDPP:
+                    x_checks = get_x_sub_kdpp(x_minmax,n_sample_for_bo,n_raw=n_sample_for_bo*2)
+                else:
+                    x_checks = np.asarray(x_sampler(n_sample_for_bo,x_minmax=x_minmax))[:,0,:]    
+                
                 a_ei,mu_checks,_ = acquisition_function(
-                    x_data_copy,y_data_copy,x_checks,gain=1.0,invlen=5.0,eps=1e-6) # get the acquisition values 
+                    x_data_copy,y_data_copy,x_checks,gain=gain,invlen=invlen,eps=eps) # get the acquisition values 
                 max_idx = np.argmax(a_ei) # select the one with the highested value 
                 # As we cannot get the actual y_eval from the real evaluation, we use the constant liar model
                 # that uses the GP mean to approximate the actual evaluation value. 
@@ -308,7 +427,6 @@ def run_bavoo(
                 print("[%.1f]sec [%d/%d] VOO took [%.1f]sec. Current best x:%s best y:[%.3f]"%
                     (esec_total,x_data.shape[0],n_data_max,esec_voo,x_sol,y_sol))
         
-
         # Coordinate Descent 
         iclk_cd = time.time()
         for _ in range(n_cd):
@@ -363,4 +481,4 @@ def run_bavoo(
             
     return x_data,y_data
     
-    
+
